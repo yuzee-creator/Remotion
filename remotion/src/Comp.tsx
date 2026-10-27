@@ -1,12 +1,3 @@
-import React from "react";
-import {
-  AbsoluteFill,
-  interpolate,
-  spring,
-  useCurrentFrame,
-  useVideoConfig,
-} from "remotion";
-
 export const meta = {
   id: "educational-motion",
   title: "Educational Motion",
@@ -15,761 +6,380 @@ export const meta = {
   width: 720,
   height: 1280,
 };
+/**
+ * ============ STYLE KIT: KARTUN POP (9:16, 720x1280, 30fps) ============
+ * ATURAN GAYA (dipakai ulang tiap video baru, ganti STORY aja):
+ * 1. Semua gerak dihitung dari t = frame/fps. Nol CSS transition.
+ * 2. Easing: eo (quart out) = masuk, eio (smootherstep) = kamera/transisi,
+ *    bk (spring overshoot) = pop-in.
+ * 3. Objek masuk = pop overshoot + jiggle teredam exp(-9d)*sin(24d),
+ *    squash&stretch SELALU berlawanan arah (X lebar -> Y pendek).
+ * 4. Tiap impact = puff partikel + number kick di kartu + pulse layar ~1%.
+ * 5. Kamera zoom-out eksponensial, fokus ke puncak objek hero.
+ * 6. Teks: Poppins 700 40px, kata muncul stagger 0.1s, blur 12->0,
+ *    geser y 16->0, shadow offset (1,4). 2 warna: gold utk kata kunci, putih sisanya.
+ * 7. Palet: navy gelap + coral/pink hero + cream sticker + gold aksen.
+ * 8. Karakter: bob idle, kedip tiap 1.7s, kepala miring pelan, pipi blush, ahoge goyang.
+ * 9. Detail grafis: highlight tepi atas, garis gelap bawah tiap layer,
+ *    3 sisi isometrik, label miring di atas objek.
+ * 10. Background: gradient navy + dot grid 60px + glow pink di belakang hero
+ *     (makin terang makin tinggi hero).
+ * 11. Intro fade dari gelap 0.12s. Durasi aman 5 detik = 150 frame.
+ * ======================================================================
+ */
+import React from "react";
+import { AbsoluteFill, Composition, useCurrentFrame, useVideoConfig } from "remotion";
 
-const W = 720;
-const H = 1280;
+/* ---------- CERITA (ganti bagian ini tiap video baru) ---------- */
+const GOLD = "#ffc933";
+const WHITE = "#ffffff";
+const STORY = {
+  handle: "@USERNAMEMU",
+  cardHead: "HARI",
+  cardSub: "TAHUN 1 M",
+  stackLabel: "100.000",
+  pill: "BELUM 3 TAHUN",
+  titles: [
+    { from: 0.35, to: 2.85, parts: [["Rp1 JUTA", GOLD], [" / HARI", WHITE]] as [string, string][] },
+    { from: 3.05, to: 99, parts: [["SEJAK ", WHITE], ["TAHUN 1", GOLD]] as [string, string][] },
+  ],
+};
 
+/* ---------- KONSTANTA GAYA ---------- */
+const W = 720, H = 1280, GR = 977;
+const FONT = "Poppins, 'Segoe UI', system-ui, sans-serif";
+const FONT_IMPORT = "@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@700&display=swap');";
 const C = {
-  bg: "#08132F",
-  pink: "#FF718D",
-  cream: "#FFF4D7",
-  yellow: "#FFC247",
-  orange: "#FF8C42",
-  white: "#F8F7F2",
-  muted: "#9AA9CA",
+  bg0: "#141d44", bg1: "#0e1532", dot: "#283462", ground: "#0c1227",
+  coral: "#ef4b57", cream: "#f2ebd9", ink: "#141a3a", pink: "#f68ca4", lav: "#9a8ffc",
 };
 
-const clamp = {
-  extrapolateLeft: "clamp" as const,
-  extrapolateRight: "clamp" as const,
+/* ---------- TIMELINE (detik) ---------- */
+const BH = 17.8;
+const BT = [0, 0.38, 0.62, 0.86, 1.1]; // mulai jatuh
+const LD = [0.32, 0.6, 0.84, 1.08, 1.35]; // mendarat
+const P0 = 1.35, P1 = 3.85, TP = 3.9, PT = 2.6;
+
+/* ---------- MATH & EASING ---------- */
+const cl = (x: number, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const eo = (t: number) => 1 - Math.pow(1 - cl(t), 4);
+const eio = (t: number) => { t = cl(t); return t * t * t * (t * (t * 6 - 15) + 10); };
+const bk = (t: number) => { t = cl(t, 0, 2); return t <= 0 ? 0 : 1 - Math.exp(-6 * t) * Math.cos(t * 13); };
+const rnd = (n: number) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+const camS = (t: number) => { const u = cl((t - P0) / (P1 - P0)); return 0.7 * u + 0.3 * (0.5 - 0.5 * Math.cos(Math.PI * u)); };
+const cam = (t: number) => { const s = camS(t); return { z: 4.1 * Math.exp(-1.41 * s), Yb: 864 + 96 * s + 266 * (1 - eo((t - 0.1) / 0.85)) }; };
+const ph = (t: number) => 120 - 110 * eio((t - 1.8) / 1.8);
+const hh = (t: number) => {
+  if (t < P0) return BH * LD.filter((l) => t >= l).length;
+  const c = cam(t);
+  return (864 + 96 * camS(t) - 500) / c.z; // puncak hero selalu nempel di y=500
+};
+const val = (t: number) => (t < P0 ? Math.max(1, LD.filter((l) => t >= l).length) : Math.floor(5 + 299 * cl((hh(t) - 89) / 371)));
+
+/* ---------- PARTIKEL (puff / ring / confetti) ---------- */
+const CONF = [C.coral, GOLD, C.lav, C.pink];
+const Particles: React.FC<{
+  t: number; at: number; x: number; y: number; kind: "puff" | "ring" | "confetti";
+  n?: number; life?: number; spread?: number; color?: string; seed?: number;
+}> = ({ t, at, x, y, kind, n = 10, life = 0.7, spread = 15, color = "255,214,228", seed = 0 }) => {
+  const d = t - at;
+  if (d < 0 || d > life) return null;
+  const f = 1 - d / life;
+  const out: React.ReactNode[] = [];
+  for (let j = 0; j < n; j++) {
+    const r = rnd(j + seed * 7.1);
+    if (kind === "puff") {
+      const m = j - (n - 1) / 2;
+      out.push(<circle key={j} cx={x + m * 10 + m * spread * d} cy={y - (35 + 45 * r) * d + 240 * d * d} r={(2.5 + 2.5 * r) * f} fill={`rgba(${color},${0.85 * f})`} />);
+    } else if (kind === "ring") {
+      const a = (j / n) * 6.283, rad = 22 + 110 * eo(d / life);
+      out.push(<circle key={j} cx={x + Math.cos(a) * rad} cy={y + Math.sin(a) * rad * 0.6} r={5 * f} fill={`rgba(${color},${f})`} />);
+    } else {
+      const ang = (rnd(j + 1) - 0.5) * Math.PI * 1.2 - Math.PI / 2, sp = 250 + 300 * r;
+      const px = x + Math.cos(ang) * sp * d, py = y + Math.sin(ang) * sp * d + 500 * d * d;
+      out.push(<rect key={j} x={px - 5} y={py - 3} width={10} height={6} fill={CONF[j % 4]} opacity={f} transform={`rotate(${j * 47 + d * 500} ${px} ${py})`} />);
+    }
+  }
+  return <g>{out}</g>;
 };
 
-const stars = Array.from({ length: 74 }, (_, i) => ({
-  x: (i * 137.5 + 31) % W,
-  y: (i * 83.7 + 17) % H,
-  r: i % 7 === 0 ? 2 : i % 3 === 0 ? 1.4 : 0.8,
-  phase: (i * 13) % 90,
-}));
-
-function Background() {
-  const frame = useCurrentFrame();
-
-  return (
-    <AbsoluteFill
-      style={{
-        background:
-          "radial-gradient(ellipse at 52% 42%, #202447 0%, #08132F 67%)",
-      }}
-    >
-      {stars.map((s, i) => (
-        <div
-          key={i}
-          style={{
-            position: "absolute",
-            left: s.x,
-            top: s.y,
-            width: s.r * 2,
-            height: s.r * 2,
-            borderRadius: 99,
-            background: "#D8E2FF",
-            opacity:
-              0.15 +
-              0.35 * ((Math.sin((frame + s.phase) / 17) + 1) / 2),
-          }}
-        />
-      ))}
-
-      <div
-        style={{
-          position: "absolute",
-          left: -130,
-          top: 280,
-          width: 980,
-          height: 520,
-          background:
-            "radial-gradient(ellipse, rgba(255,94,137,.10), transparent 68%)",
-          transform: `translateX(${Math.sin(frame / 95) * 22}px)`,
-        }}
-      />
-
-      <div
-        style={{
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: 125,
-          background:
-            "linear-gradient(180deg, #111B3B 0%, #080F27 100%)",
-          borderTop: "2px solid rgba(255,255,255,.12)",
-        }}
-      />
-
-      {Array.from({ length: 36 }, (_, i) => (
-        <div
-          key={i}
-          style={{
-            position: "absolute",
-            bottom: 40 + (i % 3) * 17,
-            left: i * 23 - ((frame * 1.2) % 23),
-            width: 12,
-            height: 5,
-            borderRadius: 5,
-            background: "#25345F",
-            opacity: 0.9,
-            transform: `rotate(${i % 2 ? 24 : -24}deg)`,
-          }}
-        />
-      ))}
-    </AbsoluteFill>
-  );
-}
-
-function DayCard({
-  value,
-  sub,
-  frame,
-}: {
-  value: string;
-  sub: string;
-  frame: number;
-}) {
-  const pop = spring({
-    frame: Math.max(0, frame),
-    fps: 30,
-    config: { damping: 13, stiffness: 150 },
-  });
-
-  return (
-    <div
-      style={{
-        position: "absolute",
-        top: 80,
-        left: 52,
-        width: 180,
-        borderRadius: 13,
-        overflow: "hidden",
-        background: C.cream,
-        color: "#18203B",
-        boxShadow: "0 10px 30px #0005",
-        transform: `translateY(${interpolate(pop, [0, 1], [22, 0])}px) scale(${interpolate(pop, [0, 1], [.92, 1])})`,
-        opacity: pop,
-      }}
-    >
-      <div
-        style={{
-          background: "#F44F67",
-          color: "white",
-          fontSize: 17,
-          fontWeight: 900,
-          letterSpacing: 2,
-          textAlign: "center",
-          padding: "7px 0",
-        }}
-      >
-        HARI
-      </div>
-
-      <div
-        style={{
-          fontSize: 34,
-          lineHeight: 1.05,
-          fontWeight: 900,
-          textAlign: "center",
-          paddingTop: 8,
-        }}
-      >
-        {value}
-      </div>
-
-      <div
-        style={{
-          fontSize: 12,
-          fontWeight: 800,
-          textAlign: "center",
-          letterSpacing: 1,
-          padding: "5px 0 12px",
-        }}
-      >
-        {sub}
-      </div>
-    </div>
-  );
-}
-
-function Bar({
-  x,
-  height,
-  label,
-  frame,
-  delay = 0,
-  color = C.pink,
-}: {
-  x: number;
-  height: number;
-  label: string;
-  frame: number;
-  delay?: number;
-  color?: string;
-}) {
-  const p = spring({
-    frame: Math.max(0, frame - delay),
-    fps: 30,
-    config: { damping: 18, stiffness: 95, mass: 0.9 },
-  });
-
-  const h = height * p;
-
+/* ---------- OBJEK KARTUN ---------- */
+const Block: React.FC<{ base: number; h: number; xo?: number; yo?: number; label: string }> = ({ base, h, xo = 0, yo = 0, label }) => {
+  const x0 = 303 + xo, x1 = 417 + xo, dx = 25, dy = 12, b = base + yo, top = b - h, n = Math.ceil(h / 7);
+  const rows: React.ReactNode[] = [];
+  for (let i = 0; i < n; i++) {
+    const yb = b - i * 7, yt = Math.max(top, yb - 7), ev = i % 2 === 0;
+    rows.push(
+      <g key={i}>
+        <rect x={x0} y={yt} width={x1 - x0} height={yb - yt} fill={ev ? "#ee5f79" : "#e9566f"} />
+        <polygon points={`${x1},${yt} ${x1 + dx},${yt - dy} ${x1 + dx},${yb - dy} ${x1},${yb}`} fill={ev ? "#b93f59" : "#ae3852"} />
+        <rect x={376 + xo} y={yt} width={18} height={yb - yt} fill="#f3e8df" />
+        <line x1={x0} y1={yt + 0.3} x2={x1} y2={yt + 0.3} stroke="rgba(255,160,178,.5)" strokeWidth={0.9} />
+        <line x1={x0} y1={yb} x2={x1} y2={yb} stroke="rgba(150,38,66,.75)" strokeWidth={1.1} />
+        <line x1={376 + xo} y1={yb} x2={394 + xo} y2={yb} stroke="rgba(175,155,145,.8)" strokeWidth={1} />
+        <line x1={x1} y1={yb} x2={x1 + dx} y2={yb - dy} stroke="rgba(105,22,48,.6)" strokeWidth={1} />
+      </g>
+    );
+  }
   return (
     <g>
-      <rect
-        x={x - 4}
-        y={790 - h}
-        width={112}
-        height={h}
-        rx={5}
-        fill={color}
-        opacity={0.12}
-      />
-
-      <rect
-        x={x}
-        y={790 - h}
-        width={104}
-        height={h}
-        rx={4}
-        fill={color}
-      />
-
-      <rect
-        x={x + 10}
-        y={790 - h + 8}
-        width={12}
-        height={Math.max(0, h - 16)}
-        fill="#FFFFFF"
-        opacity={0.18}
-      />
-
-      {h > 36 &&
-        Array.from({ length: Math.floor(h / 22) }, (_, i) => (
-          <line
-            key={i}
-            x1={x + 4}
-            x2={x + 100}
-            y1={790 - h + i * 22 + 20}
-            y2={790 - h + i * 22 + 20}
-            stroke="#8D2849"
-            strokeWidth={1.5}
-            opacity={0.32}
-          />
-        ))}
-
-      <text
-        x={x + 52}
-        y={790 - h - 20}
-        textAnchor="middle"
-        fontSize="21"
-        fontWeight="900"
-        fill={C.yellow}
-      >
-        {label}
-      </text>
+      {rows}
+      <rect x={x0} y={top} width={8} height={h} fill="rgba(255,200,215,.15)" />
+      <rect x={x1 - 10} y={top} width={10} height={h} fill="rgba(90,20,45,.16)" />
+      <line x1={x0} y1={top} x2={x0} y2={b} stroke="rgba(255,170,190,.5)" strokeWidth={1} />
+      <polygon points={`${x0},${top} ${x0 + dx},${top - dy} ${x1 + dx},${top - dy} ${x1},${top}`} fill={C.pink} />
+      <polygon points={`${376 + xo},${top} ${401 + xo},${top - dy} ${419 + xo},${top - dy} ${394 + xo},${top}`} fill="#f8eee7" />
+      {[0, 76].map((o) => (
+        <polygon key={o} points={`${x0 + 6 + o},${top - 2} ${x0 + 17 + o},${top - 6} ${x0 + 25 + o},${top - 6} ${x0 + 14 + o},${top - 2}`} fill="none" stroke="rgba(255,196,212,.8)" strokeWidth={0.9} />
+      ))}
+      {h > 5 && (
+        <text transform={`translate(${x0 + 50} ${top - 6}) matrix(1 0 -.8 .55 0 0)`} fontFamily={FONT} fontWeight={700} fontSize={9.5} fill="rgba(178,60,88,.92)" textAnchor="middle" dominantBaseline="central">{label}</text>
+      )}
+      <line x1={x0} y1={top} x2={x0 + dx} y2={top - dy} stroke="rgba(255,208,220,.7)" strokeWidth={0.9} />
     </g>
   );
-}
+};
 
-function TinyPerson({
-  x,
-  y,
-  frame,
-}: {
-  x: number;
-  y: number;
-  frame: number;
-}) {
-  const bob = Math.sin(frame / 5) * 3;
-  const walk = Math.sin(frame / 3.4) * 8;
+const Squash: React.FC<{ sx: number; sy: number; px: number; py: number; children: React.ReactNode }> = ({ sx, sy, px, py, children }) => (
+  <g transform={`translate(${px} ${py}) scale(${sx} ${sy}) translate(${-px} ${-py})`}>{children}</g>
+);
 
+const Hand: React.FC<{ x: number; y: number }> = ({ x, y }) => (
+  <g>
+    <rect x={x} y={y - 20} width={70} height={40} rx={14} fill="#fbd6bd" />
+    <rect x={x + 6} y={y - 26} width={34} height={14} rx={7} fill="#fbd6bd" />
+    {[0, 1, 2].map((k) => <line key={k} x1={x + 6} y1={y - 8 + k * 9} x2={x + 30} y2={y - 8 + k * 9} stroke="rgba(200,150,130,.6)" strokeWidth={1} />)}
+    <rect x={x + 70} y={y - 34} width={80} height={68} rx={10} fill="#f0e6d8" />
+  </g>
+);
+
+const Pedestal: React.FC<{ p: number }> = ({ p }) => {
+  const x0 = 277, x1 = 443, top = GR - p, r = p > 14 ? 5 : 2;
   return (
-    <g transform={`translate(${x},${y + bob})`}>
-      <ellipse
-        cx="0"
-        cy="0"
-        rx="17"
-        ry="4"
-        fill="#020817"
-        opacity=".4"
-      />
-
-      <circle cx="0" cy="-45" r="12" fill="#F2C8A5" />
-
-      <path
-        d="M-11 -49 Q-10 -63 2 -59 Q13 -57 11 -47"
-        fill="#302A3C"
-      />
-
-      <circle cx="4" cy="-45" r="1.5" fill="#17203C" />
-
-      <path
-        d="M-8 -31 Q0 -37 8 -31 L11 -7 L-11 -7 Z"
-        fill="#9E8BFF"
-      />
-
-      <path
-        d={`M-6 -7 L${-9 + walk * .4} 12 M6 -7 L${9 - walk * .4} 12`}
-        stroke="#E8E7FF"
-        strokeWidth="5"
-        strokeLinecap="round"
-      />
-
-      <path
-        d={`M-8 -27 L${-16 - walk * .35} -14 M8 -27 L${16 + walk * .35} -17`}
-        stroke="#F2C8A5"
-        strokeWidth="4"
-        strokeLinecap="round"
-      />
+    <g>
+      <rect x={x0} y={top} width={x1 - x0} height={p} rx={r} fill="#d5c49c" />
+      {p > 34 && (<>
+        <rect x={x1 - 40} y={top + 8} width={40} height={p - 8} rx={4} fill="#cdbc94" />
+        <rect x={x0} y={GR - 22} width={x1 - x0} height={22} rx={4} fill="#cdbc94" />
+        <rect x={x0} y={top + 8} width={18} height={p - 30} fill="#dccba3" />
+      </>)}
+      <rect x={x0} y={top} width={x1 - x0} height={Math.min(10, p)} rx={3} fill="#e8dbb8" />
+      <line x1={x0 + 3} y1={top + Math.min(10, p)} x2={x1 - 3} y2={top + Math.min(10, p)} stroke="#b8a67c" strokeWidth={1} />
     </g>
   );
-}
+};
 
-export const Comp: React.FC = () => {
+const Underground: React.FC = () => (
+  <g>
+    <rect x={-2000} y={GR} width={5000} height={3000} fill={C.ground} />
+    <rect x={-2000} y={GR} width={5000} height={80} fill="#0e142c" />
+    <rect x={-2000} y={GR + 80} width={5000} height={2} fill="#182042" />
+    <rect x={-2000} y={GR + 255} width={5000} height={2} fill="#182042" />
+    {[[20, 1110], [300, 1110], [580, 1110]].map(([x, y]) => (
+      <g key={x}><circle cx={x} cy={y} r={18} fill="#1e2852" /><circle cx={x} cy={y} r={12} fill="#0e142c" /><circle cx={x} cy={y} r={7} fill="#1e2852" /><circle cx={x} cy={y} r={3} fill="#0e142c" /></g>
+    ))}
+    {[130, 415, 697].map((x) => [1070, 1243].map((y) => (
+      <g key={`${x}${y}`}><circle cx={x} cy={y} r={10} fill="#564628" /><circle cx={x} cy={y} r={5} fill="#967828" /></g>
+    )))}
+    {[[245, 1090, 36, 14], [527, 1090, 36, 14], [115, 1180, 36, 14], [395, 1180, 36, 14], [680, 1180, 36, 14], [175, 1125, 20, 8], [455, 1125, 20, 8], [30, 1190, 20, 8], [320, 1190, 20, 8], [600, 1190, 20, 8]].map(([x, y, rx, ry], i) => (
+      <ellipse key={i} cx={x} cy={y} rx={rx} ry={ry} fill="#182046" />
+    ))}
+  </g>
+);
+
+const Character: React.FC<{ t: number; pt: number; cx?: number }> = ({ t, pt, cx = 505 }) => {
+  const s = t > pt ? bk((t - pt) / 0.4) : 0;
+  if (s < 0.02) return null;
+  const bob = Math.sin(t * 6.5) * 1.3;
+  const q = 0.12 * Math.exp(-9 * (t - pt)) * Math.sin(24 * (t - pt));
+  const sw = Math.sin(t * 5 - 0.9) * 2.5 + q * 30;
+  const hx = cx + Math.sin(t * 3.2) * 1.2, hy = 868;
+  const lg = Math.sin(t * 6.5 - 1.4) * 3 + q * 40;
+  const blink = t % 1.7 < 0.1;
+  return (
+    <g transform={`translate(${cx} ${GR + bob}) scale(${s * (1 - q)} ${s * (1 + q)}) translate(${-cx} ${-GR})`}>
+      <ellipse cx={cx} cy={GR} rx={30} ry={4} fill={C.ground} />
+      {[-11, 11].map((l) => (
+        <g key={l}>
+          <rect x={cx + l - 7} y={950} width={14} height={22} rx={3} fill="#6b74a3" />
+          <rect x={cx + l - 11 + (l < 0 ? -2 : 2)} y={967} width={22} height={10} rx={4} fill="#e9e3d2" />
+        </g>
+      ))}
+      <rect x={cx - 35} y={893} width={70} height={54} rx={25} fill={C.lav} />
+      <ellipse cx={cx} cy={936} rx={38} ry={21} fill={C.lav} />
+      <ellipse cx={cx - 38.5} cy={929 + sw} rx={10.5} ry={11} fill="#fcd9bf" />
+      <ellipse cx={cx + 38.5} cy={929 - sw} rx={10.5} ry={11} fill="#fcd9bf" />
+      <ellipse cx={hx} cy={hy} rx={34} ry={30} fill="#fde0c8" />
+      <path d={`M ${hx - 34} ${hy} A 34 30 0 0 1 ${hx + 34} ${hy} Z`} fill="#3b2f4d" />
+      <ellipse cx={hx} cy={hy + 13} rx={31} ry={17} fill="#fde0c8" />
+      <polygon points={`${hx - 3},${hy - 28} ${hx + 3 + lg * 0.5},${hy - 44} ${hx + 15 + lg},${hy - 42 + Math.abs(lg) * 0.3} ${hx + 9 + lg * 0.6},${hy - 36} ${hx + 8},${hy - 26}`} fill="#3b2f4d" />
+      {[-13, 13].map((e) => blink
+        ? <line key={e} x1={hx + e - 4} y1={hy + 4} x2={hx + e + 4} y2={hy + 4} stroke="#3a2430" strokeWidth={2} />
+        : <circle key={e} cx={hx + e} cy={hy + 4} r={3.4} fill="#3a2430" />)}
+      {[-22, 22].map((e) => (
+        <g key={e}><ellipse cx={hx + e} cy={hy + 13} rx={10} ry={7} fill="rgba(245,150,150,.25)" /><ellipse cx={hx + e} cy={hy + 13} rx={7} ry={5} fill="rgba(245,140,140,.35)" /></g>
+      ))}
+      <line x1={hx - 6} y1={hy + 17} x2={hx + 6} y2={hy + 17} stroke="#5a3a3a" strokeWidth={2} strokeLinecap="round" />
+    </g>
+  );
+};
+
+/* ---------- STICKER / HUD ---------- */
+const Card: React.FC<{ t: number; head: string; sub: string; value: number }> = ({ t, head, sub, value }) => {
+  const s = bk(t / 0.45);
+  if (s <= 0) return null;
+  const kb = LD.reduce((m, l) => (t >= l ? Math.max(m, Math.exp(-12 * (t - l))) : m), 0);
+  const tx = { fontFamily: FONT, fontWeight: 700, textAnchor: "middle" as const, dominantBaseline: "central" as const };
+  return (
+    <g transform={`translate(173 205) scale(${s}) translate(-173 -205)`}>
+      <rect x={42} y={140} width={267} height={146} rx={22} fill="rgba(5,8,20,.47)" />
+      <rect x={40} y={133} width={267} height={145} rx={22} fill={C.cream} />
+      <rect x={40} y={133} width={267} height={39} rx={20} fill={C.coral} />
+      <rect x={40} y={152} width={267} height={20} fill={C.coral} />
+      <text x={176} y={153} fontSize={21} letterSpacing={6} fill="#fff5f0" {...tx}>{head}</text>
+      <g transform={`translate(173 208) scale(${1 + 0.2 * kb})`}><text fontSize={50} fill={C.ink} {...tx}>{value}</text></g>
+      <text x={173} y={255} fontSize={22} fill="#4b4f70" {...tx}>{sub}</text>
+    </g>
+  );
+};
+
+const Pill: React.FC<{ t: number; at: number; text: string; x: number; y: number }> = ({ t, at, text, x, y }) => {
+  const s = t > at ? bk((t - at) / 0.35) : 0;
+  if (s <= 0) return null;
+  const hw = Math.max(60, (text.length * 17.7) / 2);
+  return (
+    <g transform={`translate(${x} ${y}) scale(${s})`}>
+      <rect x={-hw + 2} y={-16} width={hw * 2} height={42} rx={21} fill="rgba(5,8,20,.43)" />
+      <rect x={-hw} y={-21} width={hw * 2} height={42} rx={21} fill={C.cream} />
+      <text y={1} fontFamily={FONT} fontWeight={700} fontSize={23} fill={C.ink} textAnchor="middle" dominantBaseline="central">{text}</text>
+    </g>
+  );
+};
+
+const Handle: React.FC<{ x: number; y: number; a: number; right: boolean; text: string }> = ({ x, y, a, right, text }) => {
+  if (a <= 0.02) return null;
+  const c = "#f0f0fa";
+  return (
+    <g opacity={a}>
+      <rect x={x - 20} y={y - 20} width={40} height={40} rx={10} fill="none" stroke={c} strokeWidth={4} />
+      <circle cx={x} cy={y} r={9} fill="none" stroke={c} strokeWidth={4} />
+      <circle cx={x + 13} cy={y - 12} r={3} fill={c} />
+      <text x={right ? x + 22 : x - 20} y={right ? y + 36 : y + 64} textAnchor={right ? "end" : "start"} dominantBaseline="central" fontFamily={FONT} fontWeight={700} fontSize={17} fill={c}>{text}</text>
+    </g>
+  );
+};
+
+const Titles: React.FC<{ t: number }> = ({ t }) => (
+  <>
+    {STORY.titles.map((ln, k) => {
+      const al = Math.min(cl((t - ln.from) / 0.28), ln.to < 90 ? cl((ln.to - t) / 0.28) : 1);
+      if (al <= 0.02) return null;
+      return (
+        <div key={k} style={{ position: "absolute", left: 0, right: 0, top: 368, transform: "translateY(-50%)", display: "flex", justifyContent: "center", opacity: al, filter: `blur(${(1 - al) * 12}px)`, fontFamily: FONT, fontWeight: 700, fontSize: 40, whiteSpace: "pre" }}>
+          {ln.parts.map(([txt, col], i) => {
+            const pa = cl((t - ln.from - i * 0.1) / 0.25);
+            return <span key={i} style={{ color: col, opacity: pa, transform: `translateY(${(1 - eo(pa)) * 16}px)`, textShadow: "1px 4px 0 rgba(5,8,22,.55)" }}>{txt}</span>;
+          })}
+        </div>
+      );
+    })}
+  </>
+);
+
+/* ---------- KOMPOSISI UTAMA ---------- */
+export const MyVideo: React.FC = () => {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
+  const { fps, durationInFrames } = useVideoConfig();
+  const t = Math.min(frame / fps, durationInFrames / fps - 1 / fps);
+  const { z, Yb } = cam(t), p = ph(t), base = GR - p, hs = hh(t);
+  const topY = Yb - hs * z;
+  const pu = t > TP ? Math.exp(-(t - TP) * 9) * Math.sin((t - TP) * 30) * 0.012 : 0;
+  const gs = cl(0.25 + 0.6 * cl(hs / 460) + (t > TP ? 0.2 * Math.exp(-(t - TP) * 6) : 0));
+  const gy = cl(topY + 70, 260, 720);
 
-  const intro = spring({
-    frame,
-    fps,
-    config: { damping: 16, stiffness: 110 },
-  });
-
-  const headlineOpacity = interpolate(
-    frame,
-    [8, 24, 90, 110],
-    [0, 1, 1, 0],
-    clamp
-  );
-
-  const counter = Math.round(
-    interpolate(
-      frame,
-      [0, 150, 300, 450, 600, 750, 899],
-      [1, 12, 68, 1043, 413152, 739891, 1000000],
-      clamp
-    )
-  );
-
-  const chartShift = interpolate(
-    frame,
-    [180, 430, 700, 899],
-    [0, -45, -95, -140],
-    clamp
-  );
-
-  const pulse = 1 + Math.sin(frame / 7) * 0.025;
+  const cn = LD.filter((l) => t >= l).length;
+  const st = BH * cn;
+  const d0 = cn > 0 ? t - LD[cn - 1] : 0;
+  const sq = Math.exp(-9 * d0) * Math.cos(24 * d0);
+  const lbl = STORY.stackLabel;
+  const fallH = (Yb - st * z + 220) / z;
 
   return (
-    <AbsoluteFill
-      style={{
-        width: W,
-        height: H,
-        overflow: "hidden",
-        fontFamily: "Arial, Helvetica, sans-serif",
-        color: C.white,
-      }}
-    >
-      <Background />
+    <AbsoluteFill style={{ backgroundColor: C.bg1, overflow: "hidden", fontFamily: FONT }}>
+      <style>{FONT_IMPORT}</style>
+      <AbsoluteFill style={{ transform: `scale(${1 + pu})` }}>
+        {/* background */}
+        <AbsoluteFill style={{ background: `linear-gradient(180deg, ${C.bg0}, ${C.bg1})` }} />
+        <AbsoluteFill style={{ backgroundImage: `radial-gradient(circle, ${C.dot} 2px, transparent 2.6px)`, backgroundSize: "60px 60px", backgroundPosition: "0 10px" }} />
+        <AbsoluteFill style={{ background: `radial-gradient(ellipse 330px 420px at 360px ${gy}px, rgba(106,58,85,${gs}) 0%, rgba(106,58,85,${gs * 0.3}) 50%, rgba(106,58,85,0) 100%)` }} />
 
-      <DayCard
-        value={counter.toLocaleString("id-ID")}
-        sub={
-          frame < 150
-            ? "TAHUN 1 M"
-            : frame < 360
-              ? "TAHUN 3 M"
-              : "PERJALANAN WAKTU"
-        }
-        frame={frame}
-      />
-
-      <div
-        style={{
-          position: "absolute",
-          top: 205,
-          left: 52,
-          right: 45,
-          textAlign: "left",
-          opacity: headlineOpacity,
-          transform: `translateY(${interpolate(frame, [8, 28], [20, 0], clamp)}px)`,
-        }}
-      >
-        <div
-          style={{
-            fontSize: 23,
-            fontWeight: 800,
-            color: C.cream,
-            letterSpacing: 2,
-          }}
-        >
-          BAYANGKAN JIKA
-        </div>
-
-        <div
-          style={{
-            fontSize: 56,
-            fontWeight: 1000,
-            lineHeight: 1.04,
-            color: C.yellow,
-            textShadow: "0 4px 22px #FF9A3040",
-          }}
-        >
-          WAKTU TERUS
-        </div>
-
-        <div
-          style={{
-            fontSize: 56,
-            fontWeight: 1000,
-            lineHeight: 1.04,
-            color: C.yellow,
-          }}
-        >
-          BERJALAN
-        </div>
-      </div>
-
-      <div
-        style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          top: 790,
-          height: 3,
-          background: "#D6D9E8",
-          opacity: 0.7,
-        }}
-      />
-
-      <div
-        style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          top: 794,
-          height: 3,
-          background: C.pink,
-          opacity: 0.8,
-        }}
-      />
-
-      <svg
-        width={W}
-        height={H}
-        viewBox={`0 0 ${W} ${H}`}
-        style={{
-          position: "absolute",
-          inset: 0,
-          overflow: "visible",
-          transform: `translateX(${chartShift}px)`,
-        }}
-      >
-        <Bar x={90} height={125} label="12" frame={frame} delay={25} />
-        <Bar x={245} height={230} label="68" frame={frame} delay={65} />
-        <Bar x={400} height={330} label="1.043" frame={frame} delay={110} />
-        <Bar
-          x={555}
-          height={410}
-          label="1 M"
-          frame={frame}
-          delay={155}
-          color={C.orange}
-        />
-
-        <line
-          x1="0"
-          y1="790"
-          x2="850"
-          y2="790"
-          stroke="#F2F3FA"
-          strokeWidth="2"
-          opacity=".75"
-        />
-
-        {[0, 200, 400, 600, 800].map((n) => (
-          <g key={n}>
-            <line
-              x1={n}
-              x2={n}
-              y1="790"
-              y2="803"
-              stroke="#F2F3FA"
-              strokeWidth="2"
-              opacity=".7"
-            />
-            <text
-              x={n}
-              y="827"
-              fill={C.muted}
-              fontSize="14"
-              textAnchor="middle"
-            >
-              {n}
-            </text>
+        {/* dunia (kena kamera) */}
+        <svg width={W} height={H} style={{ position: "absolute", left: 0, top: 0 }}>
+          <g transform={`matrix(${z} 0 0 ${z} ${360 - 360 * z} ${Yb - base * z})`}>
+            <Underground />
+            <Pedestal p={p} />
+            <rect x={292} y={base - 2} width={138} height={4} rx={2} fill="#b3a279" />
+            {t < P0 ? (
+              <g>
+                {cn > 0 && st - BH > 0.5 && (
+                  <Squash sx={1 + 0.02 * sq} sy={1 - 0.03 * sq} px={360} py={base}><Block base={base} h={st - BH} label={lbl} /></Squash>
+                )}
+                {cn > 0 && (
+                  <Squash sx={1 + 0.1 * sq} sy={1 - 0.2 * sq} px={360} py={base - (st - BH)}>
+                    <Block base={base - (st - BH)} h={BH} yo={-8 * Math.exp(-9 * d0) * Math.sin(26 * d0)} label={lbl} />
+                  </Squash>
+                )}
+                {BT.map((ts, k) => {
+                  if (!(t >= ts && t < LD[k])) return null;
+                  const u = (t - ts) / (LD[k] - ts);
+                  if (k === 0) {
+                    const xo = 260 * (1 - eo(u));
+                    return <g key={k}><Block base={base} h={BH} xo={xo} label={lbl} /><Hand x={442 + xo} y={base - 8} /></g>;
+                  }
+                  const yo = -(1 - u * u) * fallH;
+                  return (
+                    <Squash key={k} sx={1 - 0.12 * u * u} sy={1 + 0.3 * u * u} px={360} py={base - st + yo}>
+                      <Block base={base - st} h={BH} yo={yo} label={lbl} />
+                    </Squash>
+                  );
+                })}
+                {t > LD[0] && t < LD[0] + 0.3 && <Hand x={442 + 260 * eio((t - LD[0]) / 0.3)} y={base - 8} />}
+              </g>
+            ) : (
+              <g transform={`translate(360 ${base}) matrix(1 0 ${0.025 * Math.sin((t - P0) * 14) * Math.exp(-(t - P0) * 2.2)} 1 0 0) translate(-360 ${-base})`}>
+                <Block base={base} h={hs} label={lbl} />
+              </g>
+            )}
+            {LD.map((te, k) => <Particles key={k} t={t} at={te} x={360} y={base - BH * (k + 1)} kind="puff" seed={k} />)}
+            <Character t={t} pt={PT} />
+            {t > P0 && t < P1 + 0.1 && [0, 1, 2].map((k) => {
+              const i = Math.round(t * 30);
+              return <circle key={k} cx={300 + rnd(i * 3 + k) * 140} cy={base - hs + rnd(i * 5 + k + 9) * 50 - 30} r={3} fill="#ffdce6" />;
+            })}
+            <line x1={-2000} y1={GR} x2={3000} y2={GR} stroke="#d7daeb" strokeWidth={2 / z} />
           </g>
-        ))}
+        </svg>
 
-        <TinyPerson x={210} y={790} frame={frame} />
-      </svg>
+        {/* HUD (tanpa kamera) */}
+        <svg width={W} height={H} style={{ position: "absolute", left: 0, top: 0 }}>
+          <Card t={t} head={STORY.cardHead} sub={STORY.cardSub} value={val(t)} />
+          <Pill t={t} at={TP} text={STORY.pill} x={560} y={427} />
+          <Particles t={t} at={TP} x={560} y={427} kind="ring" n={8} life={0.6} color="255,211,107" />
+          <Particles t={t} at={TP} x={360} y={300} kind="confetti" n={18} life={1.1} />
+          <Handle x={672} y={296} a={cl((3 - t) / 0.3) * cl((t - 0.4) / 0.3)} right text={STORY.handle} />
+          <Handle x={110} y={870} a={cl((t - 3.3) / 0.3)} right={false} text={STORY.handle} />
+        </svg>
 
-      <div
-        style={{
-          position: "absolute",
-          top: 875,
-          left: 52,
-          right: 52,
-          opacity: interpolate(
-            frame,
-            [115, 135, 245, 270],
-            [0, 1, 1, 0],
-            clamp
-          ),
-        }}
-      >
-        <div
-          style={{
-            fontSize: 20,
-            color: C.cream,
-            fontWeight: 800,
-            letterSpacing: 1,
-          }}
-        >
-          AWALNYA TERASA BIASA
-        </div>
-
-        <div
-          style={{
-            fontSize: 44,
-            color: C.yellow,
-            fontWeight: 1000,
-            lineHeight: 1.1,
-            marginTop: 8,
-          }}
-        >
-          TAPI ANGKANYA
-        </div>
-
-        <div
-          style={{
-            fontSize: 44,
-            color: C.yellow,
-            fontWeight: 1000,
-            lineHeight: 1.1,
-          }}
-        >
-          TERUS MEMBESAR
-        </div>
-      </div>
-
-      <div
-        style={{
-          position: "absolute",
-          top: 875,
-          left: 52,
-          right: 52,
-          opacity: interpolate(
-            frame,
-            [265, 290, 430, 450],
-            [0, 1, 1, 0],
-            clamp
-          ),
-        }}
-      >
-        <div
-          style={{
-            fontSize: 20,
-            color: C.cream,
-            fontWeight: 800,
-          }}
-        >
-          SETELAH BERTAHUN-TAHUN
-        </div>
-
-        <div
-          style={{
-            fontSize: 64,
-            color: C.yellow,
-            fontWeight: 1000,
-            lineHeight: 1.1,
-          }}
-        >
-          1.000.000+
-        </div>
-
-        <div
-          style={{
-            fontSize: 23,
-            color: C.white,
-            fontWeight: 700,
-            marginTop: 10,
-          }}
-        >
-          Perubahan kecil bisa jadi besar.
-        </div>
-      </div>
-
-      <svg
-        width={W}
-        height={H}
-        viewBox={`0 0 ${W} ${H}`}
-        style={{
-          position: "absolute",
-          inset: 0,
-          opacity: interpolate(
-            frame,
-            [420, 455, 850, 880],
-            [0, 1, 1, 0],
-            clamp
-          ),
-        }}
-      >
-        <path
-          d="M65 1050 L650 1050 L650 870 Z"
-          fill={C.pink}
-          opacity=".10"
-        />
-
-        <path
-          d={`M65 1050 L${interpolate(
-            frame,
-            [430, 700, 850],
-            [65, 360, 650],
-            clamp
-          )} ${interpolate(
-            frame,
-            [430, 700, 850],
-            [1050, 965, 870],
-            clamp
-          )}`}
-          stroke={C.pink}
-          strokeWidth="6"
-          fill="none"
-          strokeLinecap="round"
-        />
-
-        <circle
-          cx={interpolate(
-            frame,
-            [430, 700, 850],
-            [65, 360, 650],
-            clamp
-          )}
-          cy={interpolate(
-            frame,
-            [430, 700, 850],
-            [1050, 965, 870],
-            clamp
-          )}
-          r={9 * pulse}
-          fill={C.yellow}
-        />
-
-        <text x="65" y="1090" fill={C.muted} fontSize="17">
-          AWAL
-        </text>
-
-        <text
-          x="650"
-          y="1090"
-          fill={C.muted}
-          fontSize="17"
-          textAnchor="end"
-        >
-          SEKARANG
-        </text>
-
-        <text
-          x="360"
-          y="820"
-          fill={C.yellow}
-          fontSize="43"
-          fontWeight="900"
-          textAnchor="middle"
-        >
-          TERUS MENINGKAT
-        </text>
-
-        <text
-          x="360"
-          y="860"
-          fill={C.cream}
-          fontSize="22"
-          fontWeight="700"
-          textAnchor="middle"
-        >
-          sedikit demi sedikit
-        </text>
-      </svg>
-
-      <div
-        style={{
-          position: "absolute",
-          inset: 0,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          background: `rgba(5, 12, 31, ${interpolate(
-            frame,
-            [850, 885],
-            [0, 0.72],
-            clamp
-          )})`,
-          opacity: interpolate(frame, [850, 875], [0, 1], clamp),
-        }}
-      >
-        <div
-          style={{
-            fontSize: 23,
-            color: C.cream,
-            fontWeight: 800,
-            letterSpacing: 4,
-          }}
-        >
-          INTINYA
-        </div>
-
-        <div
-          style={{
-            marginTop: 15,
-            fontSize: 62,
-            fontWeight: 1000,
-            color: C.yellow,
-            textAlign: "center",
-            lineHeight: 1.05,
-          }}
-        >
-          HAL BESAR
-          <br />
-          BUTUH WAKTU
-        </div>
-
-        <div
-          style={{
-            marginTop: 24,
-            width: 230,
-            height: 5,
-            borderRadius: 5,
-            background: C.pink,
-            transform: `scaleX(${intro})`,
-          }}
-        />
-      </div>
-
-      <div
-        style={{
-          position: "absolute",
-          bottom: 28,
-          right: 32,
-          fontSize: 13,
-          letterSpacing: 2,
-          color: "#A7B2D2",
-          fontWeight: 800,
-          opacity: 0.65,
-        }}
-      >
-        INFO MOTION • 2D
-      </div>
+        <Titles t={t} />
+      </AbsoluteFill>
+      {t < 0.12 && <AbsoluteFill style={{ backgroundColor: `rgba(10,14,34,${1 - t / 0.12})` }} />}
     </AbsoluteFill>
   );
 };
+
+export const RemotionRoot: React.FC = () => (
+  <Composition id="MyVideo" component={MyVideo} durationInFrames={150} fps={30} width={720} height={1280} />
+);
 
 export default Comp;
